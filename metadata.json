@@ -1,0 +1,6 @@
+{
+  "name": "Claude Code Local Web Search & Weather MCP",
+  "description": "Local residential web search and real-time regional weather/time MCP tool for Claude Code CLI on Debian Linux with anti-throttling evasion and user-agent rotation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
