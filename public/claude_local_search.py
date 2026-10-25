@@ -25,6 +25,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from html import unescape
+import base64
 from typing import Dict, List, Any, Optional
 
 # ==============================================================================
@@ -237,24 +238,180 @@ def strip_html_tags(text: str) -> str:
     clean = re.sub(r'\s+', ' ', clean)
     return clean.strip()
 
-def search_duckduckgo_lite(query: str, max_results: int = 6) -> List[Dict[str, str]]:
-    """
-    Scrapes DuckDuckGo Lite / HTML endpoint using residential IP + stealth desktop headers.
-    This lightweight endpoint does not execute aggressive heavy JS challenges.
-    """
-    human_jitter(0.6, 1.8)
-    encoded_query = urllib.parse.urlencode({"q": query, "kl": "wt-wt"})
-    url = f"https://html.duckduckgo.com/html/?{encoded_query}"
+def decode_bing_url(raw_url: str) -> str:
+    """Decodes Bing redirect URLs (/ck/a?...) into destination target URL."""
+    clean_url = unescape(raw_url)
+    if "/ck/a?" in clean_url:
+        try:
+            qd = urllib.parse.parse_qs(urllib.parse.urlparse(clean_url).query)
+            u_param = qd.get("u", [""])[0]
+            if u_param.startswith("a1"):
+                b64_part = u_param[2:]
+                b64_part += "=" * (-len(b64_part) % 4)
+                return base64.b64decode(b64_part).decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+    return clean_url
+
+# ------------------------------------------------------------------------------
+# 1. Google Search Engine
+# ------------------------------------------------------------------------------
+def search_google(query: str, max_results: int = 6) -> List[Dict[str, str]]:
+    """Tries Google first with modern desktop headers."""
+    human_jitter(0.5, 1.2)
+    encoded = urllib.parse.quote(query)
+    url = f"https://www.google.com/search?q={encoded}&hl=en&gl=us&num={max_results + 2}"
+    headers = get_stealth_headers(custom_referer="https://www.google.com/")
     
-    headers = get_stealth_headers(custom_referer="https://html.duckduckgo.com/")
     req = urllib.request.Request(url, headers=headers)
-    
     results = []
     try:
-        with urllib.request.urlopen(req, timeout=14) as response:
+        with urllib.request.urlopen(req, timeout=9) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        
+        # Match standard desktop Google search result blocks
+        blocks = re.findall(r'<div[^>]*class="[^"]*\bg\b[^"]*"[^>]*>([\s\S]*?)</div>\s*</div>\s*</div>', html)
+        if not blocks:
+            # Fallback pattern for Google container
+            blocks = re.findall(r'<div[^>]*class="[^"]*MjjYud[^"]*"[^>]*>([\s\S]*?)</div>\s*</div>', html)
+
+        for b in blocks:
+            tm = re.search(r'<a[^>]*href="(https?://[^"]+)"[^>]*>[\s\S]*?<h3[^>]*>([\s\S]*?)</h3>', b)
+            sm = re.search(r'<div[^>]*class="[^"]*VwiC3b[^"]*"[^>]*>([\s\S]*?)</div>', b)
+            if not sm:
+                sm = re.search(r'<div[^>]*data-sncf="[^"]*"[^>]*>([\s\S]*?)</div>', b)
+
+            if tm:
+                dest_url = tm.group(1)
+                title = strip_html_tags(tm.group(2))
+                snippet = strip_html_tags(sm.group(1)) if sm else ""
+                # Filter out Google internal URLs
+                if "google.com/" not in dest_url and title:
+                    results.append({
+                        "title": title,
+                        "url": dest_url,
+                        "snippet": snippet
+                    })
+    except Exception:
+        pass
+    return results[:max_results]
+
+# ------------------------------------------------------------------------------
+# 2. Bing Search Engine
+# ------------------------------------------------------------------------------
+def search_bing(query: str, max_results: int = 6) -> List[Dict[str, str]]:
+    """Tries Bing second with stealth headers and redirect decoding."""
+    human_jitter(0.5, 1.2)
+    encoded = urllib.parse.quote(query)
+    url = f"https://www.bing.com/search?q={encoded}&setlang=en&count={max_results + 2}"
+    headers = get_stealth_headers(custom_referer="https://www.bing.com/")
+    
+    req = urllib.request.Request(url, headers=headers)
+    results = []
+    try:
+        with urllib.request.urlopen(req, timeout=9) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        
+        blocks = re.findall(r'<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>([\s\S]*?)</li>', html)
+        for b in blocks:
+            tm = re.search(r'<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a></h2>', b)
+            sm = re.search(r'<p[^>]*class="[^"]*b_algoSlug[^"]*"[^>]*>([\s\S]*?)</p>', b)
+            if not sm:
+                sm = re.search(r'<div[^>]*class="[^"]*b_caption[^"]*"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)</p>', b)
+            
+            if tm:
+                raw_href = tm.group(1)
+                clean_url = decode_bing_url(raw_href)
+                title = strip_html_tags(tm.group(2))
+                snippet = strip_html_tags(sm.group(1)) if sm else ""
+                if title and clean_url.startswith("http"):
+                    results.append({
+                        "title": title,
+                        "url": clean_url,
+                        "snippet": snippet
+                    })
+    except Exception:
+        pass
+    return results[:max_results]
+
+# ------------------------------------------------------------------------------
+# 3. Wikipedia Search Engine (High-Authority Knowledge Search)
+# ------------------------------------------------------------------------------
+def search_wikipedia(query: str, max_results: int = 6) -> List[Dict[str, str]]:
+    """Tries Wikipedia third using the official public search API."""
+    human_jitter(0.3, 0.8)
+    encoded = urllib.parse.quote(query)
+    url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={encoded}&utf8=&format=json&srlimit={max_results}"
+    headers = {"User-Agent": "Claude-Local-Search/1.0 (Linux; x86_64; Residential ISP)"}
+    
+    req = urllib.request.Request(url, headers=headers)
+    results = []
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        items = data.get("query", {}).get("search", [])
+        for item in items:
+            title = item.get("title", "")
+            snippet = strip_html_tags(item.get("snippet", ""))
+            page_url = f"https://en.wikipedia.org/wiki/{urllib.parse.quote(title.replace(' ', '_'))}"
+            if title:
+                results.append({
+                    "title": title,
+                    "url": page_url,
+                    "snippet": snippet
+                })
+    except Exception:
+        pass
+    return results[:max_results]
+
+# ------------------------------------------------------------------------------
+# 4. Brave Search Engine
+# ------------------------------------------------------------------------------
+def search_brave(query: str, max_results: int = 6) -> List[Dict[str, str]]:
+    """Tries Brave Search fourth with stealth headers."""
+    human_jitter(0.5, 1.2)
+    encoded = urllib.parse.quote(query)
+    url = f"https://search.brave.com/search?q={encoded}&source=web"
+    headers = get_stealth_headers(custom_referer="https://search.brave.com/")
+    
+    req = urllib.request.Request(url, headers=headers)
+    results = []
+    try:
+        with urllib.request.urlopen(req, timeout=9) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        
+        links = re.findall(r'<a[^>]*class="[^"]*heading-serpresult[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>', html)
+        snippets = re.findall(r'<div[^>]*class="[^"]*snippet-content[^"]*"[^>]*>([\s\S]*?)</div>', html)
+        
+        for i, (u, t) in enumerate(links[:max_results]):
+            snippet_text = strip_html_tags(snippets[i]) if i < len(snippets) else ""
+            title_text = strip_html_tags(t)
+            if title_text and u.startswith("http"):
+                results.append({
+                    "title": title_text,
+                    "url": u,
+                    "snippet": snippet_text
+                })
+    except Exception:
+        pass
+    return results[:max_results]
+
+# ------------------------------------------------------------------------------
+# 5. DuckDuckGo HTML / Lite Engine (Zero-JS Final Resilience Pillar)
+# ------------------------------------------------------------------------------
+def search_duckduckgo_lite(query: str, max_results: int = 6) -> List[Dict[str, str]]:
+    """Final fallback: DuckDuckGo HTML endpoint (high reliability, zero JS challenges)."""
+    human_jitter(0.6, 1.5)
+    encoded_query = urllib.parse.urlencode({"q": query, "kl": "wt-wt"})
+    url = f"https://html.duckduckgo.com/html/?{encoded_query}"
+    headers = get_stealth_headers(custom_referer="https://html.duckduckgo.com/")
+    
+    req = urllib.request.Request(url, headers=headers)
+    results = []
+    try:
+        with urllib.request.urlopen(req, timeout=12) as response:
             html = response.read().decode("utf-8", errors="replace")
         
-        # Match each full result block up to clearing div
         result_blocks = re.findall(r'<div[^>]*class="[^"]*results_links[^"]*"[^>]*>([\s\S]*?)<div class="clear">', html)
         if not result_blocks:
             result_blocks = re.findall(r'<div[^>]*class="[^"]*result__body[^"]*"[^>]*>([\s\S]*?)</div>\s*</div>', html)
@@ -267,7 +424,6 @@ def search_duckduckgo_lite(query: str, max_results: int = 6) -> List[Dict[str, s
 
             if title_match:
                 raw_href = title_match.group(1)
-                # Unpack DDG redirect uddg= if present
                 parsed_url = urllib.parse.urlparse(raw_href)
                 qd = urllib.parse.parse_qs(parsed_url.query)
                 clean_url = qd.get("uddg", [raw_href])[0] if "uddg" in qd else raw_href
@@ -281,63 +437,63 @@ def search_duckduckgo_lite(query: str, max_results: int = 6) -> List[Dict[str, s
                         "url": clean_url,
                         "snippet": snippet_text
                     })
-    except urllib.error.HTTPError as e:
-        if e.code in (403, 429):
-            # Backoff and fallback
-            human_jitter(2.0, 3.5)
-            return search_fallback_qwant(query, max_results)
-        raise e
-    except Exception:
-        # Try secondary fallback engine
-        return search_fallback_qwant(query, max_results)
-
-    return results
-
-def search_fallback_qwant(query: str, max_results: int = 5) -> List[Dict[str, str]]:
-    """Secondary fallback search engine when primary is throttled."""
-    human_jitter(0.8, 2.0)
-    encoded = urllib.parse.quote(query)
-    url = f"https://api.qwant.com/v3/search/web?q={encoded}&count={max_results}&locale=en_US&offset=0"
-    headers = get_stealth_headers()
-    headers["Accept"] = "application/json"
-    
-    req = urllib.request.Request(url, headers=headers)
-    results = []
-    try:
-        with urllib.request.urlopen(req, timeout=12) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        items = data.get("data", {}).get("result", {}).get("items", {}).get("mainline", [])
-        for block in items:
-            for item in block.get("items", []):
-                title = item.get("title", "")
-                url_str = item.get("url", "")
-                desc = item.get("desc", "")
-                if title and url_str:
-                    results.append({
-                        "title": title,
-                        "url": url_str,
-                        "snippet": desc
-                    })
     except Exception:
         pass
     return results
+
+def execute_cascaded_search(query: str, max_results: int = 6) -> Dict[str, Any]:
+    """
+    Executes search in strict requested priority order:
+      1. Google
+      2. Bing
+      3. Wikipedia
+      4. Brave Search
+      5. DuckDuckGo HTML
+    """
+    cascade = [
+        ("Google", search_google),
+        ("Bing", search_bing),
+        ("Wikipedia", search_wikipedia),
+        ("Brave Search", search_brave),
+        ("DuckDuckGo HTML", search_duckduckgo_lite),
+    ]
+
+    attempted = []
+    for engine_name, search_fn in cascade:
+        attempted.append(engine_name)
+        try:
+            results = search_fn(query, max_results)
+            if results and len(results) > 0:
+                return {
+                    "query": query,
+                    "engine_used": engine_name,
+                    "cascade_order": ["Google", "Bing", "Wikipedia", "Brave Search", "DuckDuckGo HTML"],
+                    "cascade_attempted": attempted,
+                    "results_count": len(results),
+                    "results": results,
+                    "connection": "Local Desktop/Browser ISP Network (Non-datacenter IP)",
+                    "fingerprint": "Stealth rotating Chrome/Linux headers with randomized jitter"
+                }
+        except Exception:
+            continue
+
+    return {
+        "query": query,
+        "engine_used": "None",
+        "cascade_attempted": attempted,
+        "results_count": 0,
+        "results": [],
+        "connection": "Local Desktop/Browser ISP Network (Non-datacenter IP)"
+    }
 
 # ==============================================================================
 # INTENT DETECTOR & TOOL ROUTER
 # ==============================================================================
 
 def detect_weather_or_time_intent(query: str) -> Optional[Dict[str, str]]:
-    """
-    Detects if the user query is asking for time, weather, or date in a location.
-    Examples:
-      - 'what time is it in Tokyo'
-      - 'current time in London'
-      - 'weather forecast Paris'
-      - 'how cold is it in Chicago'
-    """
+    """Detects if query is asking for time, weather, or date in a location."""
     clean_q = query.strip().lower()
     
-    # Weather patterns
     weather_patterns = [
         r'(?:what(?:\'s| is) the )?weather (?:in|for|at) ([a-zA-Z\s,.-]+)',
         r'(?:how is the weather in|current weather in) ([a-zA-Z\s,.-]+)',
@@ -350,7 +506,6 @@ def detect_weather_or_time_intent(query: str) -> Optional[Dict[str, str]]:
             loc = m.group(1).replace("?", "").replace("today", "").replace("now", "").strip()
             return {"type": "weather", "location": loc}
 
-    # Time patterns
     time_patterns = [
         r'(?:what(?:\'s| is) the )?(?:current )?time (?:in|at) ([a-zA-Z\s,.-]+)',
         r'what time is it in ([a-zA-Z\s,.-]+)',
@@ -369,7 +524,6 @@ def execute_smart_search(query: str, max_results: int = 6) -> Dict[str, Any]:
     """Unified entry point for Claude Code CLI search."""
     intent = detect_weather_or_time_intent(query)
     
-    # If explicitly or implicitly a weather/time query
     if intent:
         loc = intent["location"]
         wt_data = get_location_weather_and_time(loc)
@@ -387,18 +541,8 @@ def execute_smart_search(query: str, max_results: int = 6) -> Dict[str, Any]:
                 )
             }
 
-    # Standard evasive web search
-    results = search_duckduckgo_lite(query, max_results)
-    if not results:
-        results = search_fallback_qwant(query, max_results)
-
-    return {
-        "query": query,
-        "results_count": len(results),
-        "results": results,
-        "connection": "Local Desktop/Browser ISP Network (Non-datacenter IP)",
-        "fingerprint": "Stealth rotating Chrome/Linux headers with randomized jitter"
-    }
+    # Execute cascaded web search (Google -> Bing -> Wikipedia -> Brave -> DuckDuckGo HTML)
+    return execute_cascaded_search(query, max_results)
 
 # ==============================================================================
 # MODEL CONTEXT PROTOCOL (MCP) SERVER LOOP (STDIO)

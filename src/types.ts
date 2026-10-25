@@ -29,6 +29,9 @@ export interface SearchResultItem {
 
 export interface SearchResponse {
   query: string;
+  engine_used?: string;
+  cascade_order?: string[];
+  cascade_attempted?: string[];
   results_count?: number;
   results?: SearchResultItem[];
   intent_detected?: string;

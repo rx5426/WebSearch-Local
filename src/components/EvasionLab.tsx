@@ -126,10 +126,10 @@ export const EvasionLab: React.FC = () => {
           <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 space-y-1.5">
             <div className="font-semibold text-slate-200 flex items-center gap-1.5">
               <Sliders className="w-3.5 h-3.5 text-cyan-400" />
-              5. Cascade Fallback Engine
+              5. 5-Tier Priority Cascade
             </div>
             <p className="text-slate-400 leading-relaxed">
-              If an engine returns HTTP 429 or 403, the script automatically applies exponential backoff (2.5s) and cascades seamlessly to an alternate search index.
+              Tries in strict priority: <strong>1. Google → 2. Bing → 3. Wikipedia → 4. Brave Search → 5. DuckDuckGo HTML</strong>. If an engine blocks or rate-limits, it cascades immediately without failing the user's turn.
             </p>
           </div>
 
