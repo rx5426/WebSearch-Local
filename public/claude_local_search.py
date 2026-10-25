@@ -303,8 +303,9 @@ def search_bing(query: str, max_results: int = 6) -> List[Dict[str, str]]:
     """Tries Bing second with stealth headers and redirect decoding."""
     human_jitter(0.5, 1.2)
     encoded = urllib.parse.quote(query)
-    url = f"https://www.bing.com/search?q={encoded}&setlang=en&count={max_results + 2}"
+    url = f"https://www.bing.com/search?q={encoded}&setlang=en-US&setmkt=en-US&cc=US&count={max_results + 2}"
     headers = get_stealth_headers(custom_referer="https://www.bing.com/")
+    headers["Cookie"] = "SRCHHPGUSR=ADLT=OFF&NRSLT=10&SRCHLANG=en; _EDGE_S=mkt=en-us"
     
     req = urllib.request.Request(url, headers=headers)
     results = []
